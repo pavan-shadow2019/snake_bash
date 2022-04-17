@@ -1,354 +1,225 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
+IFS=''
 
-# check if script is executed with bash, version >= 4.0
-if [[ -z $BASH_VERSION ]]; then
-		echo 'Execute this script with bash, version >= 4.0'
-		exit 1
-fi
+declare -i height=$(($(tput lines)-5)) width=$(($(tput cols)-2))
 
-VERSION_ABOVE_OR_EQUAL_4_REGEX='^[^0-3]\..*\|^[0-9][0-9][0-9]*\..*'
-echo $BASH_VERSION | grep $VERSION_ABOVE_OR_EQUAL_4_REGEX
-if [[ $? -ne 0 ]]; then
-	echo "Execute this script with bash, version >= 4.0. Your current version=$BASH_VERSION"
-	exit 1
-fi
+# row and column number of head
+declare -i head_r head_c tail_r tail_c
 
-# remove highlighted terminal cursor
-tput civis
-# reset to normal on exit
-trap 'tput cnorm; echo Exitting $0' EXIT
+declare -i alive  
+declare -i length
+declare body
 
-# declare default options
-declare -i cols=20
-declare -i rows=12
-X_TIME=0.1
-Y_TIME=0.14
-REFRESH_TIME=$X_TIME
+declare -i direction delta_dir
+declare -i score=0
 
-# holds a screen matrix in an associative array
-declare -A screen
+border_color="\e[30;43m"
+snake_color="\e[32;42m"
+food_color="\e[34;44m"
+text_color="\e[31;43m"
+no_color="\e[0m"
 
-# array with snakebody x coordinates
-declare -a snakebod_x
+# signals
+SIG_UP=USR1
+SIG_RIGHT=USR2
+SIG_DOWN=URG
+SIG_LEFT=IO
+SIG_QUIT=WINCH
+SIG_DEAD=HUP
 
-# array with snakebody y coordinates
-declare -a snakebod_y
+echo -p "Please Enter your name RAITian Gamer :"
+read hero
 
-# initial snake velocity
-declare -i vel_x=1
-declare -i vel_y=0
+# direction arrays: 0=up, 1=right, 2=down, 3=left
+move_r=([0]=-1 [1]=0 [2]=1 [3]=0)
+move_c=([0]=0 [1]=1 [2]=0 [3]=-1)
 
-# food position
-declare -i food_x
-declare -i food_y
-
-# key input from user
-key=""
-
-# constants
-declare -r SNAKE_ICON="X"
-declare -r FOOD_ICON="O"
-declare -r EMPTY=" "
-declare -r ARROW_UP="A"
-declare -r ARROW_DOWN="B"
-declare -r ARROW_RIGHT="C"
-declare -r ARROW_LEFT="D"
-declare -r HORIZONTAL_BAR="-"
-declare -r VERTICAL_BAR="|"
-declare -r CORNER_ICON="+"
-
-parse_args ()
-{
-	local OPTIND opt
-	while getopts ":c:r:s:h" opt; do
-		case ${opt} in
-			c )
-			cols=$OPTARG
-			;;
-			r )
-			rows=$OPTARG
-			;;
-			s )
-			set_speed "$OPTARG"
-			;;
-			h )
-			usage
-			exit 0
-			;;
-			\? )
-			usage
-			exit 1
-			;;
-		esac
-	done
+init_game() {
+    clear
+    echo -ne "\e[?25l"
+    stty -echo
+    for ((i=0; i<height; i++)); do
+        for ((j=0; j<width; j++)); do
+            eval "arr$i[$j]=' '"
+        done
+    done
 }
 
-set_speed () 
-{
-	local speed_level=$1
-
-	case ${speed_level} in
-		1)
-		X_TIME=0.8
-		Y_TIME=1
-		;;
-		2)
-		X_TIME=0.6
-		Y_TIME=0.8
-		;;
-		3)
-		X_TIME=0.4
-		Y_TIME=0.6
-		;;
-		4)
-		X_TIME=0.2
-		Y_TIME=0.4
-		;;
-		5)
-		X_TIME=0.1
-		Y_TIME=0.2
-		;;
-		6)
-		X_TIME=0.08
-		Y_TIME=0.16
-		;;
-		7)
-		X_TIME=0.06
-		Y_TIME=0.12
-		;;
-		8)
-		X_TIME=0.04
-		Y_TIME=0.08
-		;;
-		9)
-		X_TIME=0.02
-		Y_TIME=0.04
-		;;
-		10)
-		X_TIME=0.01
-		Y_TIME=0.02
-		;;
-		*)
-		usage
-		exit 1
-		;;
-	esac
-	REFRESH_TIME=$X_TIME
+move_and_draw() {
+    echo -ne "\e[${1};${2}H$3"
 }
 
-usage ()
-{
-    echo "usage: $0 [-c cols ] [-r rows] [-s speed]"
-    echo "  -h display help"
-    echo "  -c cols specify game area cols. Make sure it's not higher then the actual terminal's width. "
-    echo "  -r rows specify game area rows. Make sure it's not higher then the actual terminal's height."
-    echo "  -s speed specify snake speed. Value from 1-10."
+# print everything in the buffer
+draw_board() {
+    move_and_draw 1 1 "$border_color+$no_color"
+    for ((i=2; i<=width+1; i++)); do
+        move_and_draw 1 $i "$border_color-$no_color"
+    done
+    move_and_draw 1 $((width + 2)) "$border_color+$no_color"
+    echo
+
+    for ((i=0; i<height; i++)); do
+        move_and_draw $((i+2)) 1 "$border_color|$no_color"
+        eval echo -en "\"\${arr$i[*]}\""
+        echo -e "$border_color|$no_color"
+    done
+
+    move_and_draw $((height+2)) 1 "$border_color+$no_color"
+    for ((i=2; i<=width+1; i++)); do
+        move_and_draw $((height+2)) $i "$border_color-$no_color"
+    done
+    move_and_draw $((height+2)) $((width + 2)) "$border_color+$no_color"
+    echo
 }
 
-clear_game_area_screen ()
-{
-	clear
-	for ((i=1;i<rows;i++)); do
-		for ((j=1;j<cols;j++)); do
-			screen[$i,$j]=$EMPTY
-		done
-	done
-	draw_game_area_boundaries
+# set the snake's initial state
+init_snake() {
+    alive=0
+    length=10
+    direction=0
+    delta_dir=-1
+
+    head_r=$((height/2-2))
+    head_c=$((width/2))
+
+    body=''
+    for ((i=0; i<length-1; i++)); do
+        body="1$body"
+    done
+
+    local p=$((${move_r[1]} * (length-1)))
+    local q=$((${move_c[1]} * (length-1)))
+
+    tail_r=$((head_r+p))
+    tail_c=$((head_c+q))
+
+    eval "arr$head_r[$head_c]=\"${snake_color}o$no_color\""
+
+    prev_r=$head_r
+    prev_c=$head_c
+
+    b=$body
+    while [ -n "$b" ]; do
+        # change in each direction
+        local p=${move_r[$(echo $b | grep -o '^[0-3]')]}
+        local q=${move_c[$(echo $b | grep -o '^[0-3]')]}
+        new_r=$((prev_r+p))
+        new_c=$((prev_c+q))
+        eval "arr$new_r[$new_c]=\"${snake_color}o$no_color\""
+        prev_r=$new_r
+        prev_c=$new_c
+        b=${b#[0-3]}
+    done
 }
-
-draw_game_area_boundaries()
-{
-	for i in 0 $rows; do
-		for ((j=0;j<cols;j++)); do
-			screen[$i,$j]=$HORIZONTAL_BAR
-		done
-	done
-	for j in 0 $cols; do
-		for ((i=0;i<rows+1;i++)); do
-			screen[$i,$j]=$VERTICAL_BAR
-		done
-	done
-	screen[0,0]=$CORNER_ICON
-	screen[0,$cols]=$CORNER_ICON
-	screen[$rows,$cols]=$CORNER_ICON
-	screen[$rows,0]=$CORNER_ICON
+is_dead() {
+    if [ "$1" -lt 0 ] || [ "$1" -ge "$height" ] || \
+        [ "$2" -lt 0 ] || [ "$2" -ge "$width" ]; then
+        return 0
+    fi
+    eval "local pos=\${arr$1[$2]}"
+    if [ "$pos" == "${snake_color}o$no_color" ]; then
+        return 0
+    fi
+    return 1
 }
-
-print_screen ()
-{
-	for ((i=0;i<rows+1;i++)); do
-		for ((j=0;j<cols+1;j++)); do
-			printf "${screen[$i,$j]}"
-		done
-		printf "\n"
-	done
+give_food() {
+    local food_r=$((RANDOM % height))
+    local food_c=$((RANDOM % width))
+    eval "local pos=\${arr$food_r[$food_c]}"
+    while [ "$pos" != ' ' ]; do
+        food_r=$((RANDOM % height))
+        food_c=$((RANDOM % width))
+        eval "pos=\${arr$food_r[$food_c]}"
+    done
+    eval "arr$food_r[$food_c]=\"$food_color@$no_color\""
 }
-
-handle_input ()
-{
-	if [[ "$1" = "$ARROW_UP" ]]; then
-		if (( vel_y != 1 )); then
-			vel_x=0
-			vel_y=-1
-			REFRESH_TIME=$Y_TIME
-		fi
-	elif [[ "$1" = "$ARROW_DOWN" ]]; then
-		if (( vel_y != -1 )); then
-			vel_x=0
-			vel_y=1
-			REFRESH_TIME=$Y_TIME
-		fi
-	elif [[ "$1" = "$ARROW_RIGHT" ]]; then
-		if (( vel_x != -1 )); then
-			vel_x=1
-			vel_y=0
-			REFRESH_TIME=$X_TIME
-		fi
-	elif [[ "$1" = "$ARROW_LEFT" ]]; then
-		if (( vel_x != 1 )); then
-			vel_x=-1
-			vel_y=0
-			REFRESH_TIME=$X_TIME
-		fi
-	else
-		:
-	fi
+move_snake() {
+    local newhead_r=$((head_r + move_r[direction]))
+    local newhead_c=$((head_c + move_c[direction]))
+    eval "local pos=\${arr$newhead_r[$newhead_c]}"
+    if $(is_dead $newhead_r $newhead_c); then
+        alive=1
+        return
+    fi
+    if [ "$pos" == "$food_color@$no_color" ]; then
+        length+=1
+        eval "arr$newhead_r[$newhead_c]=\"${snake_color}o$no_color\""
+        body="$(((direction+2)%4))$body"
+        head_r=$newhead_r
+        head_c=$newhead_c
+        score+=1
+        give_food;
+        return
+    fi
+    head_r=$newhead_r
+    head_c=$newhead_c
+    local d=$(echo $body | grep -o '[0-3]$')
+    body="$(((direction+2)%4))${body%[0-3]}"
+    eval "arr$tail_r[$tail_c]=' '"
+    eval "arr$head_r[$head_c]=\"${snake_color}o$no_color\""
+    # new tail
+    local p=${move_r[(d+2)%4]}
+    local q=${move_c[(d+2)%4]}
+    tail_r=$((tail_r+p))
+    tail_c=$((tail_c+q))
 }
-
-# Sets new food position randomly, it has to be an empty field
-set_food ()
-{
-	while :; do
-		food_x=$(( 1+$RANDOM%(cols-1) ))
-		food_y=$(( 1+$RANDOM%(rows-1) ))
-		screen_val=${screen[$food_y,$food_x]}
-		if [[ $screen_val == $EMPTY ]]; then
-			screen[$food_y,$food_x]=$FOOD_ICON
-			set_pixel "$food_y" "$food_x" "$FOOD_ICON"
-			return
-		fi
-	done
+change_dir() {
+    if [ $(((direction+2)%4)) -ne $1 ]; then
+        direction=$1
+    fi
+    delta_dir=-1
 }
-
-calc_new_snake_head_x () {
-	local cur_head_x=$1
-	local v_x=$2
-	new_head_x=$(( cur_head_x+v_x ))
-	if (( new_head_x == 0 )); then
-		new_head_x=$(( cols-1 ))
-	elif (( new_head_x == cols )); then
-		new_head_x=1
-	fi
+getchar() {
+    trap "" SIGINT SIGQUIT
+    trap "return;" $SIG_DEAD
+    while true; do
+        read -s -n 1 key
+        case "$key" in
+            [qQ]) kill -$SIG_QUIT $game_pid
+                  return
+                  ;;
+            [kK]) kill -$SIG_UP $game_pid
+                  ;;
+            [lL]) kill -$SIG_RIGHT $game_pid
+                  ;;
+            [jJ]) kill -$SIG_DOWN $game_pid
+                  ;;
+            [hH]) kill -$SIG_LEFT $game_pid
+                  ;;
+       esac
+    done
 }
-
-calc_new_snake_head_y () {
-	local cur_head_y=$1
-	local v_y=$2
-	new_head_y=$(( cur_head_y+v_y ))
-	if (( new_head_y == 0 )); then
-		new_head_y=$(( rows-1 ))
-	elif (( new_head_y == rows )); then
-		new_head_y=1
-	fi
+game_loop() {
+    trap "delta_dir=0;" $SIG_UP
+    trap "delta_dir=1;" $SIG_RIGHT
+    trap "delta_dir=2;" $SIG_DOWN
+    trap "delta_dir=3;" $SIG_LEFT
+    trap "exit 1;" $SIG_QUIT
+    while [ "$alive" -eq 0 ]; do
+        echo -e "\n${text_color}           $hero Your score: $score $no_color"
+        if [ "$delta_dir" -ne -1 ]; then
+            change_dir $delta_dir
+        fi
+        move_snake
+        draw_board
+        sleep 0.03
+    done
+    
+    echo -e "${text_color}Oh, No! You 0xdead$no_color"
+    # signals the input loop that the snake is dead
+    kill -$SIG_DEAD $$
 }
-
-check_win_cond () {
-	local max_snake_length=$(( (rows-1)*(cols-1) ))
-	if [[ ${#snakebod_x[@]} -eq $max_snake_length ]]; then
-		set_cursor_below_game
-		echo You won! Congratulations!
-		exit 0
-	fi
+clear_game() {
+    stty echo
+    echo -e "\e[?25h"
 }
-
-game ()
-{
-	clear_snake
-	local head_x=${snakebod_x[0]}
-	local head_y=${snakebod_y[0]}
-	declare -i new_head_x
-	declare -i new_head_y
-	calc_new_snake_head_x $head_x $vel_x
-	calc_new_snake_head_y $head_y $vel_y
-	local snake_length=${#snakebod_x[@]}
-
-	# check if new head positions is not inside snake
-	for ((i=0;i<snake_length-1;i++));
-	do
-		if [[ ${snakebod_y[i]} -eq $new_head_y ]] && [[ ${snakebod_x[i]} -eq $new_head_x ]]; then
-			set_cursor_below_game
-			echo Snake ate itself. You lose!
-			exit 0
-		fi
-	done
-
-	# if head is were food is, do not remove the last element of snake body and set new food position
-	if (( new_head_x == food_x )) && (( new_head_y == food_y )); then
-		snakebod_x=($new_head_x ${snakebod_x[@]:0:${#snakebod_x[@]}})
-		snakebod_y=($new_head_y ${snakebod_y[@]:0:${#snakebod_y[@]}})
-		draw_snake
-		check_win_cond
-		set_food
-	else
-		snakebod_x=($new_head_x ${snakebod_x[@]:0:${#snakebod_x[@]}-1})
-		snakebod_y=($new_head_y ${snakebod_y[@]:0:${#snakebod_y[@]}-1})
-		draw_snake
-	fi
-}
-
-clear_snake ()
-{
-	local snake_length=${#snakebod_x[@]}
-	for ((i=0;i<snake_length;i++));
-	do
-		screen[${snakebod_y[i]},${snakebod_x[i]}]=$EMPTY
-	done
-	set_pixel "${snakebod_y[snake_length-1]}" "${snakebod_x[snake_length-1]}" "$EMPTY"
-}
-
-draw_snake ()
-{
-	local snake_length=${#snakebod_x[@]}
-	for ((i=0;i<snake_length;i++));
-	do
-		screen[${snakebod_y[i]},${snakebod_x[i]}]=$SNAKE_ICON	
-	done
-	set_pixel "${snakebod_y[0]}" "${snakebod_x[0]}" "$SNAKE_ICON"
-}
-
-set_pixel ()
-{
-	tput cup "$1" "$2"
-	printf "%s" "$3"
-}
-
-set_cursor_below_game ()
-{
-	tput cup $(($rows+1)) 0
-}
-
-# execute game loop, then sleep for REFRESH_TIME in a subshell and send SIGALRM to the current process
-# thanks to the trap below it will trigger the game loop again
-tick() {
-	tput cup 0 0
-	handle_input "$key"
-	game
-	( sleep $REFRESH_TIME; kill -s ALRM $$ &> /dev/null )&
-}
-trap tick ALRM
-
-parse_args "$@"
-# initialize game area
-snakebod_x=( $((cols/2)) )
-snakebod_y=( $((rows/2)) )
-clear_game_area_screen
-print_screen
-set_food
-# start game
-tick
-# poll for user input in loop
-for (( ; ; ))
-do
-	read -rsn 1 key
-done
+init_game
+init_snake
+give_food
+draw_board
+game_loop &
+game_pid=$!
+getchar
+clear_game
+exit 0
